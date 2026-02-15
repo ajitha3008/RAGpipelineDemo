@@ -5,7 +5,10 @@ Web Scraping -> Chunking -> Embedding -> ChromaDB -> Retrieval -> LLM Generation
 Data Sources: ajithayasmin.com, ajithayasmin.wordpress.com
 """
 
+import asyncio
 import os
+import warnings
+warnings.filterwarnings("ignore", message=".*google.generativeai.*")
 
 import gradio as gr
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -98,6 +101,58 @@ def call_llm(prompt: str, system_msg: str = "") -> str:
     return resp.choices[0].message.content
 
 
+# ---------------------------------------------------------------------------
+# RAGAS Evaluation
+# ---------------------------------------------------------------------------
+
+def evaluate_rag_response(question: str, answer: str, contexts: list[str]) -> dict:
+    """Evaluate a RAG response using RAGAS metrics (Faithfulness & Answer Relevancy)."""
+    try:
+        from openai import AsyncOpenAI
+        from ragas.llms import llm_factory
+        from ragas.embeddings import HuggingFaceEmbeddings as RagasHFEmbeddings
+        from ragas.metrics.collections import Faithfulness, AnswerRelevancy
+
+        client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
+        llm = llm_factory("gpt-4o-mini", client=client)
+        embeddings = RagasHFEmbeddings(model=EMBED_MODEL)
+
+        faithfulness = Faithfulness(llm=llm)
+        relevancy = AnswerRelevancy(llm=llm, embeddings=embeddings)
+
+        async def _eval():
+            faith_score = await faithfulness.ascore(
+                user_input=question, response=answer, retrieved_contexts=contexts,
+            )
+            rel_score = await relevancy.ascore(
+                user_input=question, response=answer,
+            )
+            return float(faith_score), float(rel_score)
+
+        loop = asyncio.new_event_loop()
+        faith, rel = loop.run_until_complete(_eval())
+        loop.close()
+
+        overall = round((faith + rel) / 2, 4)
+        return {"faithfulness": round(faith, 4), "answer_relevancy": round(rel, 4), "overall": overall}
+    except Exception as e:
+        return {"faithfulness": 0, "answer_relevancy": 0, "overall": 0, "error": str(e)}
+
+
+def format_eval_scores(scores: dict) -> str:
+    if scores.get("error"):
+        return f"**RAGAS Eval failed:** {scores['error']}"
+    bar = lambda v: "█" * round(v * 10) + "░" * (10 - round(v * 10))
+    return (
+        f"### RAGAS Eval Scores\n"
+        f"| Metric | Score | |\n"
+        f"|--------|-------|---|\n"
+        f"| Faithfulness | {bar(scores['faithfulness'])} | **{scores['faithfulness']:.2f}** |\n"
+        f"| Answer Relevancy | {bar(scores['answer_relevancy'])} | **{scores['answer_relevancy']:.2f}** |\n"
+        f"| **Overall** | | **{scores['overall']:.2f}** |"
+    )
+
+
 RAG_SYSTEM = (
     "Answer using ONLY the provided context. If insufficient, say so. "
     "Cite chunk numbers [1], [2], etc."
@@ -106,17 +161,31 @@ RAG_SYSTEM = (
 NO_RAG_SYSTEM = "Answer using only your general knowledge. You have no access to specific documents."
 
 
-def answer_with_rag(query: str, pipeline: RAGPipeline) -> tuple[str, str]:
+def answer_with_rag(query: str, pipeline: RAGPipeline, progress=gr.Progress()):
     if not pipeline.is_built:
-        return "Pipeline not built yet.", ""
+        yield "Pipeline not built yet.", "", ""
+        return
+
+    progress(0.1, desc="Retrieving relevant chunks...")
     results = pipeline.retrieve(query, top_k=5)
-    context = "\n\n".join(f"[{i}] {r['text']}" for i, r in enumerate(results, 1))
+    contexts = [r["text"] for r in results]
+    context_str = "\n\n".join(f"[{i}] {r['text']}" for i, r in enumerate(results, 1))
     details = "\n\n".join(
         f"**Chunk {i}** (score: {r['score']:.4f}, source: {r['source']})\n```\n{r['text'][:300]}\n```"
         for i, r in enumerate(results, 1)
     )
-    answer = call_llm(f"Context:\n{context}\n\nQuestion: {query}\n\nAnswer:", RAG_SYSTEM)
-    return answer, details
+
+    progress(0.3, desc="Generating answer from LLM...")
+    yield "Generating answer...", details, ""
+    answer = call_llm(f"Context:\n{context_str}\n\nQuestion: {query}\n\nAnswer:", RAG_SYSTEM)
+
+    progress(0.7, desc="Running RAGAS evaluation...")
+    yield answer, details, "Running RAGAS evaluation..."
+    scores = evaluate_rag_response(query, answer, contexts)
+    eval_display = format_eval_scores(scores)
+
+    progress(1.0, desc="Done!")
+    yield answer, details, eval_display
 
 
 # ---------------------------------------------------------------------------
@@ -166,8 +235,15 @@ def create_ui():
             gr.Examples([[q] for q in SAMPLES], inputs=rag_q)
             rag_btn = gr.Button("Search & Answer", variant="primary")
             rag_ans = gr.Markdown(label="Answer")
+            rag_eval = gr.Markdown(label="LLM Eval Scores")
             rag_ctx = gr.Markdown(label="Retrieved Chunks")
-            rag_btn.click(fn=lambda q: answer_with_rag(q, pipeline) if q.strip() else ("Enter a question.", ""), inputs=rag_q, outputs=[rag_ans, rag_ctx])
+            def do_rag(q):
+                if not q.strip():
+                    yield "Enter a question.", "", ""
+                    return
+                yield from answer_with_rag(q, pipeline)
+
+            rag_btn.click(fn=do_rag, inputs=rag_q, outputs=[rag_ans, rag_ctx, rag_eval])
 
         with gr.Tab("Without RAG"):
             gr.Markdown("### Ask without retrieval (LLM knowledge only)")
@@ -189,16 +265,40 @@ def create_ui():
                 with gr.Column():
                     gr.Markdown("### Without RAG")
                     cmp_norag = gr.Markdown()
+            cmp_eval = gr.Markdown(label="LLM Eval Scores")
             cmp_ctx = gr.Markdown(label="Retrieved Chunks")
 
-            def do_compare(q):
+            def do_compare(q, progress=gr.Progress()):
                 if not q.strip():
-                    return "Enter a question.", "Enter a question.", ""
-                rag_a, details = answer_with_rag(q, pipeline)
-                norag_a = call_llm(q, NO_RAG_SYSTEM)
-                return rag_a, norag_a, details
+                    yield "Enter a question.", "Enter a question.", "", ""
+                    return
 
-            cmp_btn.click(fn=do_compare, inputs=cmp_q, outputs=[cmp_rag, cmp_norag, cmp_ctx])
+                progress(0.1, desc="Retrieving relevant chunks...")
+                results = pipeline.retrieve(q, top_k=5)
+                contexts = [r["text"] for r in results]
+                context_str = "\n\n".join(f"[{i}] {r['text']}" for i, r in enumerate(results, 1))
+                details = "\n\n".join(
+                    f"**Chunk {i}** (score: {r['score']:.4f}, source: {r['source']})\n```\n{r['text'][:300]}\n```"
+                    for i, r in enumerate(results, 1)
+                )
+
+                progress(0.25, desc="Generating RAG answer...")
+                yield "Generating answer...", "", "", details
+                rag_a = call_llm(f"Context:\n{context_str}\n\nQuestion: {q}\n\nAnswer:", RAG_SYSTEM)
+
+                progress(0.5, desc="Generating non-RAG answer...")
+                yield rag_a, "Generating answer...", "", details
+                norag_a = call_llm(q, NO_RAG_SYSTEM)
+
+                progress(0.75, desc="Running RAGAS evaluation...")
+                yield rag_a, norag_a, "Running RAGAS evaluation...", details
+                scores = evaluate_rag_response(q, rag_a, contexts)
+                eval_display = format_eval_scores(scores)
+
+                progress(1.0, desc="Done!")
+                yield rag_a, norag_a, eval_display, details
+
+            cmp_btn.click(fn=do_compare, inputs=cmp_q, outputs=[cmp_rag, cmp_norag, cmp_eval, cmp_ctx])
 
         with gr.Tab("How It Works"):
             gr.Markdown("""
