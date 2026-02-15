@@ -1,60 +1,46 @@
 # RAG Pipeline Demo
 
-A complete Retrieval-Augmented Generation (RAG) pipeline demo built with Gradio and LangChain.
+A complete Retrieval-Augmented Generation pipeline demo using LangChain, ChromaDB, and Gradio.
 
-**Pipeline:** Web Scraping → Text Chunking (LangChain) → Vector Embedding → FAISS Indexing (LangChain) → Semantic Retrieval → LLM Generation (OpenAI)
+**Pipeline:** Web Scraping -> Chunking (LangChain) -> Embedding -> ChromaDB -> Retrieval -> OpenAI
 
 **Data Sources:**
 - [ajithayasmin.com](https://ajithayasmin.com/)
-- [psychxgalore.wordpress.com](https://psychxgalore.wordpress.com/)
+- [ajithayasmin.wordpress.com](https://ajithayasmin.wordpress.com/)
 
 ## Setup
 
-### 1. Install dependencies
-
 ```bash
 pip install -r requirements.txt
-```
-
-### 2. Set your OpenAI API key
-
-```bash
-export OPENAI_API_KEY="your-api-key-here"
-```
-
-### 3. Run the app
-
-```bash
+export OPENAI_API_KEY="your-key-here"
 python app.py
 ```
 
-The app will be available at **http://localhost:7860**.
+Open **http://localhost:7860**.
 
 ## How to Use
 
-1. **Build Pipeline** tab — Click "Build RAG Pipeline" to scrape the websites, chunk the text, generate embeddings, and build the FAISS index.
-2. **With RAG** tab — Ask questions and get answers grounded in the scraped documents.
-3. **Without RAG** tab — Ask the same questions using only the LLM's general knowledge (no retrieval).
-4. **Compare** tab — See RAG vs. non-RAG answers side by side.
-5. **How It Works** tab — Learn about each stage of the pipeline.
+1. **Build Pipeline** — Scrape, chunk, embed, and index into ChromaDB.
+2. **With RAG** — Ask questions answered using retrieved context.
+3. **Without RAG** — Same questions using only LLM knowledge.
+4. **Compare** — Side-by-side RAG vs non-RAG.
 
 ## Project Structure
 
 ```
-├── app.py           # Main app: RAG pipeline, LLM generation, Gradio UI
-├── scraper.py       # Web scraping utilities (fetch, parse, cache)
-├── requirements.txt
-├── README.md
-└── cache/           # Auto-created: scraped pages + FAISS index
+app.py           # RAG pipeline, LLM calls, Gradio UI
+scraper.py       # Web scraping utilities
+requirements.txt
+cache/           # Auto-created: scraped pages + ChromaDB
 ```
 
 ## Tech Stack
 
 | Component | Tool |
 |-----------|------|
-| Web Scraping | requests + BeautifulSoup |
-| Text Chunking | LangChain RecursiveCharacterTextSplitter |
+| Scraping | requests + BeautifulSoup |
+| Chunking | LangChain RecursiveCharacterTextSplitter |
 | Embeddings | LangChain HuggingFaceEmbeddings (all-MiniLM-L6-v2) |
-| Vector Store | LangChain FAISS |
+| Vector Store | ChromaDB |
 | LLM | OpenAI GPT-4o-mini |
 | UI | Gradio |
